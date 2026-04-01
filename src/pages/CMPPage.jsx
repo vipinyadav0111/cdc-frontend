@@ -1553,8 +1553,7 @@ function AnalyticsView({ trainers, theme }) {
     const totalAssign = mw.reduce((a,r)=>a+(parseInt(r.assigned)||0),0);
     const totalPct    = pct(totalDone,totalAssign);
 
-    const aiHTML = (fullProgAI||'').split('
-').map(line => {
+    const aiHTML = (fullProgAI||'').split('\n').map(line => {
       if (line.startsWith('## ')) return `<h2 style="background:#1b3a6b;color:white;padding:8px 14px;border-radius:4px;margin:18px 0 8px;font-size:14px">${line.replace('## ','')}</h2>`;
       if (line.match(/^[-•*]\s/)) return `<div style="padding:3px 0 3px 20px;font-size:13px;color:#1a1a2e">▸ ${line.replace(/^[-•*]\s/,'')}</div>`;
       if (line.trim()) return `<p style="margin:5px 0;font-size:13px;line-height:1.7;color:#1a1a2e">${line}</p>`;
