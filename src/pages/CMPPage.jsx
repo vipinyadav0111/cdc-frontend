@@ -1457,13 +1457,24 @@ function AnalyticsView({ trainers, theme }) {
   const loadFullProgData = async () => {
     setFullProgLoading(true);
     setShowFullProg(true);
+    const tok = localStorage.getItem('token');
+    const BASE = API_BASE;
     try {
-      const d = await api('/cmp/full-program-data');
+      const r1 = await fetch(`${BASE}/cmp/full-program-data`, {
+        headers: { 'Content-Type':'application/json', Authorization:`Bearer ${tok}` }
+      });
+      if (!r1.ok) throw new Error(`Data fetch failed: ${r1.status}`);
+      const d = await r1.json();
       setFullProgData(d);
       // Auto-generate AI text
       setFullProgAILoading(true);
       try {
-        const d2 = await api('/cmp/program-report', { method: 'POST', body: JSON.stringify({}) });
+        const r2 = await fetch(`${BASE}/cmp/program-report`, {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${tok}` },
+          body: JSON.stringify({})
+        });
+        const d2 = await r2.json();
         setFullProgAI(d2.report || '');
       } catch(e) { setFullProgAI(''); }
       finally { setFullProgAILoading(false); }
