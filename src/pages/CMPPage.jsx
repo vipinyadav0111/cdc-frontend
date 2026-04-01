@@ -1253,13 +1253,18 @@ function AttendanceRow({ a, theme, i, onToggle }) {
 // ══════════════════════════════════════════════════════════════════
 
 function AnalyticsView({ trainers, theme }) {
-  const [data,      setData]      = useState(null);
-  const [loading,   setLoading]   = useState(true);
-  const [selTid,    setSelTid]    = useState('');
-  const [aiReport,  setAiReport]  = useState('');
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiType,    setAiType]    = useState(null); // 'combined' | 'individual'
-  const [showAI,    setShowAI]    = useState(false);
+  const [data,               setData]               = useState(null);
+  const [loading,            setLoading]            = useState(true);
+  const [selTid,             setSelTid]             = useState('');
+  const [aiReport,           setAiReport]           = useState('');
+  const [aiLoading,          setAiLoading]          = useState(false);
+  const [aiType,             setAiType]             = useState(null);
+  const [showAI,             setShowAI]             = useState(false);
+  const [fullProgData,       setFullProgData]       = useState(null);
+  const [fullProgLoading,    setFullProgLoading]    = useState(false);
+  const [fullProgAI,         setFullProgAI]         = useState('');
+  const [fullProgAILoading,  setFullProgAILoading]  = useState(false);
+  const [showFullProg,       setShowFullProg]       = useState(false);
 
   // KEY FIX: useEffect watches selTid so it re-runs on trainer change
   useEffect(() => { load(selTid); }, [selTid]);
@@ -1448,7 +1453,230 @@ function AnalyticsView({ trainers, theme }) {
     setTimeout(() => w.print(), 800);
   };
 
+  // ── FULL PROGRAM REPORT ────────────────────────────────────────
+  const loadFullProgData = async () => {
+    setFullProgLoading(true);
+    setShowFullProg(true);
+    try {
+      const d = await api('/cmp/full-program-data');
+      setFullProgData(d);
+      // Auto-generate AI text
+      setFullProgAILoading(true);
+      try {
+        const d2 = await api('/cmp/program-report', { method: 'POST', body: JSON.stringify({}) });
+        setFullProgAI(d2.report || '');
+      } catch(e) { setFullProgAI(''); }
+      finally { setFullProgAILoading(false); }
+    } catch(e) { alert('Error loading report data: ' + e.message); setShowFullProg(false); }
+    finally { setFullProgLoading(false); }
+  };
+
+  const downloadFullDocx = async () => {
+    if (!fullProgData) return;
+    const tok = localStorage.getItem('token');
+    const resp = await fetch(`${API_BASE}/cmp/download-full-report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+      body: JSON.stringify({ ...fullProgData, aiText: fullProgAI }),
+    });
+    if (resp.ok) {
+      const b = await resp.blob();
+      const u = URL.createObjectURL(b);
+      const a = document.createElement('a');
+      a.href = u;
+      a.download = `CMP2026_Full_Program_Report.docx`;
+      a.click(); URL.revokeObjectURL(u);
+    } else { alert('DOCX generation failed'); }
+  };
+
+  const printFullHTML = () => {
+    if (!fullProgData) return;
+    const t  = fullProgData.totals  || {};
+    const gs = fullProgData.grpSummary || {};
+    const sc = fullProgData.scores  || {};
+    const mw = fullProgData.mentorwise || [];
+    const total = parseInt(t.total) || 1;
+    const pct = (n,d) => d ? Math.round((parseInt(n)||0)/parseInt(d)*100) : 0;
+    const scColor = v => !v ? '#94a3b8' : parseFloat(v)<=2 ? '#dc2626' : parseFloat(v)<4 ? '#d97706' : '#059669';
+    const scBg    = v => !v ? '#f3f4f6' : parseFloat(v)<=2 ? '#fee2e2' : parseFloat(v)<4 ? '#fef3c7' : '#d1fae5';
+    const scLabel = v => !v ? '—' : (['','Poor','Below Avg','Average','Good','Excellent'][Math.round(parseFloat(v))]||'');
+
+    // Build bar chart SVG
+    const barH = 28, gap = 8, labelW = 160, innerW = 380, numW = 90;
+    const chartH = mw.length*(barH+gap)+60;
+    const getCol = p => p>=80 ? '#059669' : p>=50 ? '#d97706' : '#dc2626';
+    const barsHTML = mw.map((r,i) => {
+      const done = parseInt(r.i1_done)||0;
+      const assign = parseInt(r.assigned)||1;
+      const p = Math.round(done/assign*100);
+      const bw = Math.max(Math.round(p/100*innerW), done>0?3:0);
+      const y = 50 + i*(barH+gap);
+      const name = (r.name||'').length>22 ? r.name.slice(0,20)+'…' : (r.name||'');
+      return `<text x="0" y="${y+barH*0.72}" font-size="11" fill="#374151" font-family="Calibri,Arial">${name}</text>
+        <rect x="${labelW}" y="${y}" width="${innerW}" height="${barH}" rx="3" fill="#f1f5f9"/>
+        <rect x="${labelW}" y="${y}" width="${bw}" height="${barH}" rx="3" fill="${getCol(p)}"/>
+        <text x="${labelW+innerW+8}" y="${y+barH*0.72}" font-size="11" font-weight="bold" fill="${getCol(p)}" font-family="Calibri,Arial">${done}/${assign} (${p}%)</text>`;
+    }).join('');
+
+    const chartSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="${labelW+innerW+numW}" height="${chartH}">
+      <text x="0" y="16" font-size="12" font-weight="bold" fill="#1b3a6b" font-family="Calibri,Arial">Session 1 — 1-on-1 Completion per Mentor</text>
+      <text x="0" y="30" font-size="10" fill="#6b7280" font-family="Calibri,Arial">■ Green ≥80%  ■ Amber 50–79%  ■ Red &lt;50%</text>
+      ${barsHTML}</svg>`;
+
+    // Build mentor table rows
+    const mentorRows = mw.map((r,i) => {
+      const done=parseInt(r.i1_done)||0, assign=parseInt(r.assigned)||1;
+      const pending=assign-done, p=pct(done,assign);
+      const avg = r.avg_overall ? parseFloat(r.avg_overall).toFixed(1) : '—';
+      return `<tr style="background:${i%2===0?'white':'#f8fafc'}">
+        <td style="padding:7px 10px;font-weight:600">${r.name||'—'}</td>
+        <td style="padding:7px 10px;text-align:center">${assign}</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${done>0?'#059669':'#dc2626'}">${done}</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${pending>0?'#d97706':'#059669'}">${pending}</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:800;color:${getCol(p)};background:${scBg(p/20)}">${p}%</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${scColor(r.avg_overall)};background:${scBg(r.avg_overall)}">${avg}</td>
+      </tr>`;
+    }).join('');
+
+    const totalDone   = mw.reduce((a,r)=>a+(parseInt(r.i1_done)||0),0);
+    const totalAssign = mw.reduce((a,r)=>a+(parseInt(r.assigned)||0),0);
+    const totalPct    = pct(totalDone,totalAssign);
+
+    const aiHTML = (fullProgAI||'').split('
+').map(line => {
+      if (line.startsWith('## ')) return `<h2 style="background:#1b3a6b;color:white;padding:8px 14px;border-radius:4px;margin:18px 0 8px;font-size:14px">${line.replace('## ','')}</h2>`;
+      if (line.match(/^[-•*]\s/)) return `<div style="padding:3px 0 3px 20px;font-size:13px;color:#1a1a2e">▸ ${line.replace(/^[-•*]\s/,'')}</div>`;
+      if (line.trim()) return `<p style="margin:5px 0;font-size:13px;line-height:1.7;color:#1a1a2e">${line}</p>`;
+      return '<br/>';
+    }).join('');
+
+    const grpPresent=parseInt(t.grp_present)||0, grpAbsent=parseInt(t.grp_absent)||0;
+    const grpPct=pct(grpPresent,total);
+    const date = fullProgData.generatedAt || new Date().toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'});
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>CMP 2026 — Full Program Report</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:'Segoe UI',Calibri,Arial,sans-serif;margin:0;padding:0;color:#1a1a2e;background:#f8fafc}
+  .header{background:linear-gradient(135deg,#1b3a6b,#243f7a);color:white;padding:28px 40px;display:flex;justify-content:space-between;align-items:center}
+  .header h1{margin:0 0 4px;font-size:20px;font-weight:800}
+  .header p{margin:0;font-size:12px;opacity:0.75}
+  .header-badge{text-align:right}
+  .header-badge .prog{font-size:11px;color:#c8960c;font-weight:700;letter-spacing:1px}
+  .header-badge .date{font-size:12px;opacity:0.8;margin-top:2px}
+  .gold-bar{height:5px;background:linear-gradient(90deg,#c8960c,#0f7173)}
+  .kpi-strip{display:grid;grid-template-columns:repeat(6,1fr);gap:0;background:white;border-bottom:1px solid #e2e8f0}
+  .kpi{padding:14px 12px;border-right:1px solid #e2e8f0;text-align:center}
+  .kpi:last-child{border-right:none}
+  .kpi .val{font-size:22px;font-weight:800}
+  .kpi .lbl{font-size:10px;color:#6b7280;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px}
+  .body{padding:24px 40px;max-width:1100px;margin:0 auto}
+  .sec-title{font-size:13px;font-weight:800;color:#1b3a6b;text-transform:uppercase;letter-spacing:0.5px;
+             padding-bottom:6px;border-bottom:3px solid #0f7173;margin:24px 0 12px;display:flex;align-items:center;gap:6px}
+  .card{background:white;border-radius:10px;border:1px solid #e2e8f0;padding:16px;margin-bottom:16px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{background:#1b3a6b;color:white;padding:9px 12px;text-align:left;font-size:12px;font-weight:700}
+  th.c{text-align:center}
+  td{padding:7px 12px;border-bottom:1px solid #f1f5f9}
+  .score-card{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:0}
+  .score-box{border-radius:8px;padding:12px;text-align:center;border:1px solid #e2e8f0}
+  .score-box .sval{font-size:24px;font-weight:800}
+  .score-box .slbl{font-size:11px;font-weight:600;color:#374151;margin-bottom:2px}
+  .score-box .sdesc{font-size:10px;font-style:italic}
+  .footer{background:#1b3a6b;color:#aaccee;text-align:center;padding:14px;font-size:11px;margin-top:32px}
+  @media print{body{background:white}.kpi-strip{-webkit-print-color-adjust:exact;print-color-adjust:exact}th{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style></head><body>
+
+<div class="header">
+  <div>
+    <h1>CAREER DEVELOPMENT CENTRE — CMP 2026</h1>
+    <p>Manav Rachna Educational Institutions (MREI) · Full Program Performance Report</p>
+  </div>
+  <div class="header-badge">
+    <div class="prog">CONFIDENTIAL</div>
+    <div class="date">${date}</div>
+  </div>
+</div>
+<div class="gold-bar"></div>
+
+<div class="kpi-strip">
+  <div class="kpi"><div class="val" style="color:#1b3a6b">${total}</div><div class="lbl">Total Students</div></div>
+  <div class="kpi"><div class="val" style="color:#0f7173">${grpPresent}/${total}</div><div class="lbl">Group Mtg Present</div></div>
+  <div class="kpi"><div class="val" style="color:#059669">${t.i1_done||0}/${total}</div><div class="lbl">Session 1 Done</div></div>
+  <div class="kpi"><div class="val" style="color:#d97706">${t.i2_done||0}/${total}</div><div class="lbl">Session 2 Done</div></div>
+  <div class="kpi"><div class="val" style="color:#243f7a">${gs.mentors_with_meeting||0}/${gs.total_mentors||0}</div><div class="lbl">Mentors w/ Grp Mtg</div></div>
+  <div class="kpi"><div class="val" style="color:${getCol(totalPct)}">${totalPct}%</div><div class="lbl">S1 Coverage</div></div>
+</div>
+
+<div class="body">
+
+  <div class="sec-title">👥 Group Meeting — Consolidated</div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Activity</th><th class="c">Total Students</th><th class="c">Present</th><th class="c">Absent</th><th class="c">Attendance %</th></tr></thead>
+      <tbody>
+        <tr>
+          <td style="font-weight:600">Group Orientation Meeting</td>
+          <td style="text-align:center">${total}</td>
+          <td style="text-align:center;font-weight:700;color:#059669">${grpPresent}</td>
+          <td style="text-align:center;font-weight:700;color:${grpAbsent>0?'#dc2626':'#059669'}">${grpAbsent}</td>
+          <td style="text-align:center;font-weight:800;font-size:15px;color:${getCol(grpPct)}">${grpPct}%</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sec-title">📋 Session 1 — Mentor-wise 1-on-1 Compliance</div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Mentor Name</th><th class="c">Assigned</th><th class="c">Done</th><th class="c">Pending</th><th class="c">%</th><th class="c">Avg Score</th></tr></thead>
+      <tbody>
+        ${mentorRows}
+        <tr style="background:#1b3a6b;color:white">
+          <td style="font-weight:800;color:white">TOTAL / OVERALL</td>
+          <td style="text-align:center;font-weight:800;color:white">${totalAssign}</td>
+          <td style="text-align:center;font-weight:800;color:white">${totalDone}</td>
+          <td style="text-align:center;font-weight:800;color:white">${totalAssign-totalDone}</td>
+          <td style="text-align:center;font-weight:800;color:white">${totalPct}%</td>
+          <td style="text-align:center;font-weight:800;color:white">${sc.resume ? parseFloat(sc.resume).toFixed(1) : '—'}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sec-title">📊 Session 1 Compliance — Bar Chart</div>
+  <div class="card" style="overflow-x:auto">
+    <div style="min-width:630px">${chartSVG}</div>
+  </div>
+
+  <div class="sec-title">🎯 Session 1 — Overall Assessment Scores</div>
+  <div class="card">
+    <div class="score-card">
+      ${[['Resume',sc.resume],['Communication',sc.comm],['Grooming',sc.grooming],['Attitude',sc.attitude],['Technical',sc.tech]].map(([lbl,v])=>`
+        <div class="score-box" style="background:${scBg(v)}">
+          <div class="slbl">${lbl}</div>
+          <div class="sval" style="color:${scColor(v)}">${v?parseFloat(v).toFixed(1)+'/5':'—'}</div>
+          <div class="sdesc" style="color:${scColor(v)}">${scLabel(v)}</div>
+        </div>`).join('')}
+    </div>
+  </div>
+
+  ${fullProgAI ? `<div class="sec-title">🤖 AI Analysis & Recommendations</div>
+  <div class="card">${aiHTML}</div>` : ''}
+
+</div>
+<div class="footer">Career Development Centre (CDC) · Manav Rachna Educational Institutions · CMP 2026 · CONFIDENTIAL · ${date}</div>
+</body></html>`;
+
+    const w = window.open('','_blank','width=1100,height=800');
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => w.print(), 900);
+  };
+
   const card = { background:theme.card, borderRadius:'12px', border:`1px solid ${theme.border}`, padding:'16px' };
+
   const selectedName = selTid ? trainers.find(t=>String(t.id)===selTid)?.name : null;
 
   const BarChart = ({ data: bars, valueKey='cnt', labelKey, color='#3b82f6' }) => {
@@ -1539,15 +1767,18 @@ function AnalyticsView({ trainers, theme }) {
           {selectedName ? `Showing data for ${selectedName}` : `Showing combined data for all ${data?.total||'…'} students`}
         </span>
 
-        {/* AI Report buttons */}
-        <div style={{ display:'flex',gap:'8px' }}>
-          <button onClick={()=>genAIReport('combined')} disabled={aiLoading} style={{
+        {/* Report buttons */}
+        <div style={{ display:'flex',gap:'8px',flexWrap:'wrap' }}>
+          {/* Full Program Report — new structured report */}
+          <button onClick={loadFullProgData} disabled={fullProgLoading} style={{
             padding:'8px 14px',borderRadius:'9px',border:'none',
-            background:aiLoading&&aiType==='combined'?'#94a3b8':'#1e3a5f',
-            color:'#fff',cursor:'pointer',fontSize:'12px',fontWeight:'600',whiteSpace:'nowrap'
+            background: fullProgLoading ? '#94a3b8' : '#1b3a6b',
+            color:'#fff',cursor:'pointer',fontSize:'12px',fontWeight:'600',whiteSpace:'nowrap',
+            boxShadow:'0 2px 6px rgba(27,58,107,0.3)'
           }}>
-            {aiLoading&&aiType==='combined'?'Generating…':'🤖 Full Program Report'}
+            {fullProgLoading ? '⏳ Loading…' : '📊 Full Program Report'}
           </button>
+          {/* Individual trainer AI report */}
           {selTid && (
             <button onClick={()=>genAIReport('individual')} disabled={aiLoading} style={{
               padding:'8px 14px',borderRadius:'9px',border:'none',
@@ -1592,6 +1823,210 @@ function AnalyticsView({ trainers, theme }) {
               {aiReport}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── FULL PROGRAM REPORT PANEL ─────────────────────────── */}
+      {showFullProg && (
+        <div style={{ background:theme.card,borderRadius:'14px',border:`2px solid #1b3a6b`,padding:'24px',marginBottom:'20px',boxShadow:'0 4px 20px rgba(27,58,107,0.12)' }}>
+          {/* Panel Header */}
+          <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'18px',paddingBottom:'14px',borderBottom:`2px solid #e2e8f0` }}>
+            <div>
+              <div style={{ fontWeight:'800',fontSize:'16px',color:'#1b3a6b' }}>📊 CMP 2026 — Full Program Report</div>
+              <div style={{ fontSize:'12px',color:theme.subtext,marginTop:'2px' }}>{fullProgData?.generatedAt || ''} · Career Development Centre, MREI</div>
+            </div>
+            <div style={{ display:'flex',gap:'8px',alignItems:'center' }}>
+              {fullProgData && !fullProgLoading && (
+                <>
+                  <button onClick={downloadFullDocx} style={{ padding:'8px 14px',borderRadius:'8px',border:'none',background:'#1b3a6b',color:'#fff',cursor:'pointer',fontSize:'12px',fontWeight:'700',display:'flex',alignItems:'center',gap:'5px' }}>
+                    ⬇️ DOCX
+                  </button>
+                  <button onClick={printFullHTML} style={{ padding:'8px 14px',borderRadius:'8px',border:'none',background:'#059669',color:'#fff',cursor:'pointer',fontSize:'12px',fontWeight:'700',display:'flex',alignItems:'center',gap:'5px' }}>
+                    📄 HTML / PDF
+                  </button>
+                </>
+              )}
+              <button onClick={()=>setShowFullProg(false)} style={{ background:'none',border:`1px solid ${theme.border}`,borderRadius:'8px',padding:'6px 10px',fontSize:'16px',cursor:'pointer',color:theme.subtext }}>✕</button>
+            </div>
+          </div>
+
+          {fullProgLoading ? (
+            <div style={{ textAlign:'center',padding:'50px' }}>
+              <div style={{ fontSize:'40px',marginBottom:'12px' }}>📊</div>
+              <div style={{ fontWeight:'700',color:theme.text,fontSize:'15px' }}>Building Full Program Report…</div>
+              <div style={{ fontSize:'12px',color:theme.subtext,marginTop:'6px' }}>Fetching data from all mentors</div>
+            </div>
+          ) : fullProgData ? (() => {
+            const t   = fullProgData.totals     || {};
+            const gs  = fullProgData.grpSummary || {};
+            const sc  = fullProgData.scores     || {};
+            const mw  = fullProgData.mentorwise || [];
+            const total = parseInt(t.total)||1;
+            const pct = (n,d) => d ? Math.round((parseInt(n)||0)/parseInt(d)*100) : 0;
+            const scColor = v => !v?theme.subtext:parseFloat(v)<=2?'#dc2626':parseFloat(v)<4?'#d97706':'#059669';
+            const scBg    = v => !v?'#f3f4f6':parseFloat(v)<=2?'#fee2e2':parseFloat(v)<4?'#fef3c7':'#d1fae5';
+            const scLabel = v => !v?'—':(['','Poor','Below Avg','Average','Good','Excellent'][Math.round(parseFloat(v))]||'');
+            const getBarColor = p => p>=80?'#059669':p>=50?'#d97706':'#dc2626';
+            const totalDone   = mw.reduce((a,r)=>a+(parseInt(r.i1_done)||0),0);
+            const totalAssign = mw.reduce((a,r)=>a+(parseInt(r.assigned)||0),0);
+            const totalPct    = pct(totalDone,totalAssign);
+
+            return (
+              <div>
+                {/* KPI Strip */}
+                <div style={{ display:'grid',gridTemplateColumns:'repeat(6,1fr)',gap:'8px',marginBottom:'20px' }}>
+                  {[
+                    { label:'Total Students',    val:total,                                    color:'#1b3a6b' },
+                    { label:'Group Mtg Present', val:`${t.grp_present||0}/${total}`,           color:'#0f7173' },
+                    { label:'Session 1 Done',    val:`${t.i1_done||0}/${total}`,               color:'#059669' },
+                    { label:'Session 2 Done',    val:`${t.i2_done||0}/${total}`,               color:'#d97706' },
+                    { label:'Mentors w/ Grp Mtg',val:`${gs.mentors_with_meeting||0}/${gs.total_mentors||0}`, color:'#243f7a' },
+                    { label:'S1 Coverage',       val:`${totalPct}%`,                           color:getBarColor(totalPct) },
+                  ].map(k=>(
+                    <div key={k.label} style={{ background:theme.bg||'#f8fafc',borderRadius:'10px',padding:'12px 10px',textAlign:'center',border:`1px solid #e2e8f0`,borderTop:`3px solid ${k.color}` }}>
+                      <div style={{ fontSize:'20px',fontWeight:'800',color:k.color }}>{k.val}</div>
+                      <div style={{ fontSize:'10px',color:theme.subtext,marginTop:'3px',lineHeight:'1.3' }}>{k.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Group Meeting Table */}
+                <div style={{ marginBottom:'20px' }}>
+                  <div style={{ fontWeight:'700',fontSize:'13px',color:'#1b3a6b',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'0.5px',borderBottom:'2px solid #0f7173',paddingBottom:'4px' }}>
+                    👥 Group Meeting — Consolidated
+                  </div>
+                  <table style={{ width:'100%',borderCollapse:'collapse',fontSize:'13px' }}>
+                    <thead>
+                      <tr style={{ background:'#1b3a6b',color:'white' }}>
+                        {['Activity','Total Students','Present','Absent','Attendance %'].map(h=>(
+                          <th key={h} style={{ padding:'9px 12px',textAlign:h==='Activity'?'left':'center',fontWeight:'700',fontSize:'12px' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td style={{ padding:'9px 12px',fontWeight:'600',borderBottom:'1px solid #e2e8f0' }}>Group Orientation Meeting</td>
+                        <td style={{ padding:'9px 12px',textAlign:'center',borderBottom:'1px solid #e2e8f0' }}>{total}</td>
+                        <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'700',color:'#059669',borderBottom:'1px solid #e2e8f0' }}>{t.grp_present||0}</td>
+                        <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'700',color:(t.grp_absent||0)>0?'#dc2626':'#059669',borderBottom:'1px solid #e2e8f0' }}>{t.grp_absent||0}</td>
+                        <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'800',fontSize:'15px',color:getBarColor(pct(t.grp_present,total)),background:scBg(pct(t.grp_present,total)/20),borderBottom:'1px solid #e2e8f0' }}>
+                          {pct(t.grp_present,total)}%
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Session 1 Mentor Table */}
+                <div style={{ marginBottom:'20px' }}>
+                  <div style={{ fontWeight:'700',fontSize:'13px',color:'#1b3a6b',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'0.5px',borderBottom:'2px solid #0f7173',paddingBottom:'4px' }}>
+                    📋 Session 1 — Mentor-wise 1-on-1 Compliance
+                  </div>
+                  <div style={{ overflowX:'auto' }}>
+                    <table style={{ width:'100%',borderCollapse:'collapse',fontSize:'12px',minWidth:'580px' }}>
+                      <thead>
+                        <tr style={{ background:'#1b3a6b',color:'white' }}>
+                          {['Mentor Name','Assigned','Done','Pending','%','Avg Score'].map((h,i)=>(
+                            <th key={h} style={{ padding:'9px 12px',textAlign:i===0?'left':'center',fontWeight:'700',fontSize:'12px' }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mw.map((r,i)=>{
+                          const done=parseInt(r.i1_done)||0,assign=parseInt(r.assigned)||1;
+                          const pending=assign-done, p=pct(done,assign);
+                          const avg=r.avg_overall?parseFloat(r.avg_overall).toFixed(1):'—';
+                          return (
+                            <tr key={r.id} style={{ background:i%2===0?theme.card:'#f8fafc' }}>
+                              <td style={{ padding:'8px 12px',fontWeight:'600',color:theme.text,borderBottom:'1px solid #e2e8f0' }}>{r.name}</td>
+                              <td style={{ padding:'8px 12px',textAlign:'center',borderBottom:'1px solid #e2e8f0',color:theme.text }}>{assign}</td>
+                              <td style={{ padding:'8px 12px',textAlign:'center',fontWeight:'700',color:done>0?'#059669':'#dc2626',borderBottom:'1px solid #e2e8f0' }}>{done}</td>
+                              <td style={{ padding:'8px 12px',textAlign:'center',fontWeight:'700',color:pending>0?'#d97706':'#059669',borderBottom:'1px solid #e2e8f0' }}>{pending}</td>
+                              <td style={{ padding:'8px 12px',textAlign:'center',fontWeight:'800',color:getBarColor(p),background:scBg(p/20),borderBottom:'1px solid #e2e8f0' }}>{p}%</td>
+                              <td style={{ padding:'8px 12px',textAlign:'center',fontWeight:'700',color:scColor(r.avg_overall),background:scBg(r.avg_overall),borderBottom:'1px solid #e2e8f0' }}>{avg}</td>
+                            </tr>
+                          );
+                        })}
+                        {/* Totals row */}
+                        <tr style={{ background:'#1b3a6b' }}>
+                          <td style={{ padding:'9px 12px',fontWeight:'800',color:'white' }}>TOTAL / OVERALL</td>
+                          <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'800',color:'white' }}>{totalAssign}</td>
+                          <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'800',color:'white' }}>{totalDone}</td>
+                          <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'800',color:'white' }}>{totalAssign-totalDone}</td>
+                          <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'800',color:'white' }}>{totalPct}%</td>
+                          <td style={{ padding:'9px 12px',textAlign:'center',fontWeight:'800',color:'white' }}>{sc.resume?parseFloat(sc.resume).toFixed(1):'—'}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Bar Chart */}
+                <div style={{ marginBottom:'20px' }}>
+                  <div style={{ fontWeight:'700',fontSize:'13px',color:'#1b3a6b',marginBottom:'10px',textTransform:'uppercase',letterSpacing:'0.5px',borderBottom:'2px solid #0f7173',paddingBottom:'4px' }}>
+                    📊 Session 1 Compliance — Bar Chart
+                  </div>
+                  <div style={{ background:'white',borderRadius:'10px',border:'1px solid #e2e8f0',padding:'16px',overflowX:'auto' }}>
+                    {mw.map((r,i)=>{
+                      const done=parseInt(r.i1_done)||0,assign=parseInt(r.assigned)||1;
+                      const p=pct(done,assign);
+                      return (
+                        <div key={r.id} style={{ marginBottom:'10px' }}>
+                          <div style={{ display:'flex',justifyContent:'space-between',fontSize:'12px',marginBottom:'4px' }}>
+                            <span style={{ fontWeight:'600',color:theme.text,minWidth:'160px' }}>{r.name}</span>
+                            <span style={{ fontWeight:'800',color:getBarColor(p),fontSize:'12px' }}>{done}/{assign} ({p}%)</span>
+                          </div>
+                          <div style={{ height:'20px',background:'#f1f5f9',borderRadius:'4px',overflow:'hidden' }}>
+                            <div style={{ width:`${Math.max(p,done>0?2:0)}%`,height:'100%',background:getBarColor(p),borderRadius:'4px',transition:'width 0.5s ease' }}/>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div style={{ display:'flex',gap:'16px',marginTop:'10px',fontSize:'11px',color:theme.subtext }}>
+                      <span style={{ color:'#059669' }}>■ ≥80% On Track</span>
+                      <span style={{ color:'#d97706' }}>■ 50–79% Needs Attention</span>
+                      <span style={{ color:'#dc2626' }}>■ &lt;50% Critical</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Score Cards */}
+                <div style={{ marginBottom:'20px' }}>
+                  <div style={{ fontWeight:'700',fontSize:'13px',color:'#1b3a6b',marginBottom:'10px',textTransform:'uppercase',letterSpacing:'0.5px',borderBottom:'2px solid #0f7173',paddingBottom:'4px' }}>
+                    🎯 Session 1 — Overall Assessment Scores
+                  </div>
+                  <div style={{ display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:'10px' }}>
+                    {[['Resume',sc.resume],['Communication',sc.comm],['Grooming',sc.grooming],['Attitude',sc.attitude],['Technical',sc.tech]].map(([lbl,v])=>(
+                      <div key={lbl} style={{ background:scBg(v),borderRadius:'10px',padding:'14px',textAlign:'center',border:'1px solid #e2e8f0' }}>
+                        <div style={{ fontSize:'11px',fontWeight:'700',color:'#374151',marginBottom:'4px' }}>{lbl}</div>
+                        <div style={{ fontSize:'24px',fontWeight:'800',color:scColor(v) }}>{v?parseFloat(v).toFixed(1)+'/5':'—'}</div>
+                        <div style={{ fontSize:'11px',color:scColor(v),fontStyle:'italic' }}>{scLabel(v)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* AI Analysis */}
+                {(fullProgAILoading || fullProgAI) && (
+                  <div style={{ marginBottom:'8px' }}>
+                    <div style={{ fontWeight:'700',fontSize:'13px',color:'#1b3a6b',marginBottom:'10px',textTransform:'uppercase',letterSpacing:'0.5px',borderBottom:'2px solid #0f7173',paddingBottom:'4px' }}>
+                      🤖 AI Analysis & Recommendations
+                    </div>
+                    {fullProgAILoading ? (
+                      <div style={{ textAlign:'center',padding:'24px',color:theme.subtext }}>
+                        <div style={{ fontSize:'24px',marginBottom:'6px' }}>🤖</div>
+                        Generating AI analysis…
+                      </div>
+                    ) : (
+                      <div style={{ fontSize:'13px',lineHeight:'1.8',color:theme.text,whiteSpace:'pre-wrap',fontFamily:'Georgia,serif',maxHeight:'350px',overflowY:'auto',padding:'4px 0' }}>
+                        {fullProgAI}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })() : null}
         </div>
       )}
 
